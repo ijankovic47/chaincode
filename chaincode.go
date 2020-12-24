@@ -46,16 +46,15 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 	if err != nil {
 		fmt.Printf("Error creating new Smart Contract: %s", err)
 	}
+	cert, err := client.GetX509Certificate()
 
-	id, err := client.GetID()
-	mspId, err := client.GetMSPID()
-
-	var clientId string = mspId + id
+	var clientId string = cert.Subject.CommonName
 
 	function, args := stub.GetFunctionAndParameters()
 	logger.Infof("Function name is:  %d", function)
 	logger.Infof("Args length is : %d", len(args))
 	logger.Infof("ID KLIJENTA JE:  %d", clientId)
+	logger.Infof("COMMON NAME:  %d", cert.Subject.CommonName)
 
 	switch function {
 	case "insertPerson":
@@ -64,10 +63,10 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 		return s.readPerson(stub, args)
 	case "readAllPersons":
 		return s.readAllPersons(stub, args)
-	case "readCert":
-		return s.readCert(stub, args)
 	case "personAddField":
-		return s.personAddField(stub, args)
+		return s.personAddFields(stub, args)
+	case "approveAccess":
+		return s.approveAccess(stub, args)
 	default:
 		return shim.Error("Invalid Smart Contract function name.")
 	}
@@ -75,13 +74,19 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 
 	return shim.Success(nil)
 }
-func (s *SmartContractPrinter) Init(APIstub shim.ChaincodeStubInterface) sc.Response {
-	return shim.Success(nil)
-}
 
 func (s *SmartContractPrinter) insertPerson(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
 
 	var person = Person{Name: args[0], Surname: args[1], Ident: args[2], IdentType: args[3]}
+	if(len(args) > 4) {
+		var fields []Field
+		err := json.Unmarshal([]byte(args[4]), &fields)
+		if err != nil {
+			fmt.Printf("NIJE USPEO UNMARSHALING: %s", err)
+		} else{
+			person.Fields = fields
+		}
+	}
 	personAsBytes, _ := json.Marshal(person)
 	APIstub.PutState(person.Ident, personAsBytes)
 	return shim.Success(personAsBytes)
@@ -138,27 +143,7 @@ func (s *SmartContractPrinter) readPerson(APIstub shim.ChaincodeStubInterface, a
 	return shim.Success(personAsBytes)
 }
 
-func (s *SmartContractPrinter) readCert(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
-
-	var buffer bytes.Buffer
-
-	client, err := cid.New(APIstub)
-
-	cert, err := client.GetX509Certificate()
-
-	creator, err := APIstub.GetCreator()
-	if err != nil {
-		fmt.Printf("Error creating new Smart Contract: %s", err)
-	}
-	id, err := client.GetID()
-	buffer.WriteString("Creator " + string(creator))
-	buffer.WriteString(", Signature " + string(cert.Signature))
-	buffer.WriteString(", MSPId " + string(cert.Signature))
-	buffer.WriteString(", ID " + string(id))
-	return shim.Success(buffer.Bytes())
-
-}
-func (s *SmartContractPrinter) personAddField(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
+func (s *SmartContractPrinter) personAddFields(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
 	var personIdent string = args[0]
 	logger.Critical("ADDING FIELD FOR PERSON IDENT " + personIdent)
 	logger.Critical("FIELD ARG " + args[1])
@@ -214,18 +199,17 @@ func (s *SmartContractPrinter) approveAccess(APIstub shim.ChaincodeStubInterface
 		fmt.Printf("Error creating new Smart Contract: %s", err)
 	}
 
-	id, err := client.GetID()
-	mspId, err := client.GetMSPID()
+	cert, err := client.GetX509Certificate()
 
-	var clientId string = mspId + id
+	var clientId string = cert.Subject.CommonName
 	var personIdent string = args[0]
-	var reqClientFabricId = args[1]
+	var requesterId = args[1]
 	var fieldNames []string
 
 	_ = json.Unmarshal([]byte(args[2]), &fieldNames)
 
 	logger.Infof("Person ident is:  %d", personIdent)
-	logger.Infof("Requesting client id:  %d", reqClientFabricId)
+	logger.Infof("Requesting client id:  %d", requesterId)
 	logger.Infof("Field names:  %d", fieldNames)
 
 	personBytes, err := APIstub.GetState(personIdent)
@@ -233,46 +217,56 @@ func (s *SmartContractPrinter) approveAccess(APIstub shim.ChaincodeStubInterface
 	if err != nil {
 		fmt.Printf("Error creating new Smart Contract: %s", err)
 	}
-	if(personBytes == nil) {
+	if personBytes == nil {
 		return shim.Error("Person " + personIdent + " not found!")
 	}
 	var person Person
 	json.Unmarshal(personBytes, &person)
+	var isChanged bool = false
+
 	for i, f := range person.Fields {
 		fmt.Println(i, f.Name)
 		for fni, fn := range  fieldNames {
 			fmt.Println(fni, fn)
-			var isEndorser bool = false
-			if(fn == f.Name) {
-				for eidi, eid := range  f.Endorsers {
-					fmt.Println(eidi, eid)
-					if(eid == clientId) {
-						isEndorser = true
-					}
+			if fn == f.Name {
+				isEndorser := contains(f.Endorsers, clientId)
+				if !isEndorser {
+					logger.Critical("CLIENT NOT ENDORSER ON FIELD " + fn)
+					continue
 				}
-				if(!isEndorser) {
-					break
-				}
-
+				logger.Critical("CLIENT IS ENDORSER ON FIELD " + fn)
 				for vpi, vp := range f.ViewPermissions {
 					fmt.Println(vpi, vp)
-					if(vp.RequesterId == reqClientFabricId) {
-						var isEndorsmentAdded bool = false
-						for eidi, eid :=range vp.Endorsers {
-							fmt.Println(eidi, eid)
-							if(eid == clientId) {
-								isEndorser = true
-							}
-						}
-						if(!isEndorsmentAdded) {
+					if vp.RequesterId == requesterId {
+						logger.Critical("REQUESTER ON FIELD FOUND " + vp.RequesterId)
+						var isEndorsementAdded bool = contains(vp.Endorsers, clientId)
+						if !isEndorsementAdded {
+							logger.Critical("ENDORSEMENT NOT FOUND, ADDING NEW")
 							vp.Endorsers = append(vp.Endorsers, clientId)
+							f.ViewPermissions[vpi] = vp
+							isChanged = true
 						}
 					}
 				}
 			}
 		}
+		person.Fields[i] = f
 	}
-	return shim.Error("")
+	if isChanged {
+		logger.Critical("CHANGE DONE, SAVING")
+		insertPersonAsBytes, _ := json.Marshal(person)
+		APIstub.PutState(person.Ident, insertPersonAsBytes)
+	}
+	return shim.Success(nil)
+}
+
+func contains(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -280,4 +274,7 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error creating new Smart Contract: %s", err)
 	}
+}
+func (s *SmartContractPrinter) Init(APIstub shim.ChaincodeStubInterface) sc.Response {
+	return shim.Success(nil)
 }
