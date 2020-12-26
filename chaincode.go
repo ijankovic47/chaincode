@@ -7,7 +7,9 @@ import (
 	_ "encoding/json"
 	"fmt"
 	"github.com/hyperledger/fabric-chaincode-go/pkg/cid"
+	"strconv"
 	_ "strconv"
+	"time"
 	_ "time"
 
 	"github.com/hyperledger/fabric-chaincode-go/shim"
@@ -67,6 +69,10 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 		return s.personAddFields(stub, args)
 	case "approveAccess":
 		return s.approveAccess(stub, args)
+	case "requestAccess":
+		return s.requestAccess(stub, args)
+	case "readHistoryForAsset":
+		return s.readHistoryForAsset(stub, args)
 	default:
 		return shim.Error("Invalid Smart Contract function name.")
 	}
@@ -78,7 +84,7 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 func (s *SmartContractPrinter) insertPerson(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
 
 	var person = Person{Name: args[0], Surname: args[1], Ident: args[2], IdentType: args[3]}
-	if(len(args) > 4) {
+	if len(args) > 4 {
 		var fields []Field
 		err := json.Unmarshal([]byte(args[4]), &fields)
 		if err != nil {
@@ -150,7 +156,7 @@ func (s *SmartContractPrinter) personAddFields(APIstub shim.ChaincodeStubInterfa
 
 	personAsBytes, _ := APIstub.GetState(args[0])
 
-	if(personAsBytes == nil) {
+	if personAsBytes == nil {
 		shim.Error("Person ident " + personIdent + " not found !")
 	}
 	var person Person
@@ -159,11 +165,11 @@ func (s *SmartContractPrinter) personAddFields(APIstub shim.ChaincodeStubInterfa
 	var fields []Field
 	err := json.Unmarshal([]byte(args[1]), &fields)
 
-	if(err != nil) {
+	if err != nil {
 		fmt.Printf("NIJE USPEO UNMARSHALING: %s", err)
 	}
 
-	if(len(person.Fields) == 0) {
+	if len(person.Fields) == 0 {
 		logger.Critical("OSOBA NEMA POLJA, UPISUJEMO !")
 		person.Fields = fields
 	} else {
@@ -171,13 +177,13 @@ func (s *SmartContractPrinter) personAddFields(APIstub shim.ChaincodeStubInterfa
 			logger.Critical("Iter " + string(i))
 			var updatedExistingField bool = false
 			for j, personField := range person.Fields {
-				if (newField.Name == personField.Name) {
+				if newField.Name == personField.Name {
 					logger.Critical("VEC POSTOJI POLJE NAZIV: " + newField.Name + ", RADIMO UPDATE !")
 					person.Fields[j] = newField
 					updatedExistingField = true
 				}
 			}
-			if(!updatedExistingField) {
+			if !updatedExistingField {
 				logger.Critical("RADIMO UNOS NOVOG POLJA NAZIV: " + newField.Name)
 				person.Fields = append(person.Fields, newField)
 			}
@@ -258,6 +264,143 @@ func (s *SmartContractPrinter) approveAccess(APIstub shim.ChaincodeStubInterface
 		APIstub.PutState(person.Ident, insertPersonAsBytes)
 	}
 	return shim.Success(nil)
+}
+
+func (s *SmartContractPrinter) requestAccess(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
+
+	client, err := cid.New(APIstub)
+	if err != nil {
+		fmt.Printf("Error creating new Smart Contract: %s", err)
+	}
+
+	cert, err := client.GetX509Certificate()
+
+	var clientId string = cert.Subject.CommonName
+	var personIdent string = args[0]
+	var fieldNames []string
+	_ = json.Unmarshal([]byte(args[1]), &fieldNames)
+
+	logger.Infof("Person ident is:  %d", personIdent)
+	logger.Infof("Field names:  %d", fieldNames)
+
+	person := getPerson(personIdent, APIstub)
+
+	if err != nil {
+		fmt.Printf("Error creating new Smart Contract: %s", err)
+	}
+
+	var isChanged bool = false
+
+	for i, f := range person.Fields {
+		fmt.Println(i, f.Name)
+		for fni, fn := range  fieldNames {
+			fmt.Println(fni, fn)
+			if fn == f.Name {
+				isAccessRequestExists := isAccessRequestExists(f.ViewPermissions, clientId)
+				if isAccessRequestExists {
+					logger.Critical("ACCESS REQUEST FOR FIELD " + fn + " ALREADY EXISTS !")
+					continue
+				} else{
+					logger.Critical("ADDING ACCESS REQUEST FOR FIELD " + fn + " FOR CLIENT " + clientId )
+					newViewPermission := ViewPermission{RequesterId: clientId}
+					f.ViewPermissions = append(f.ViewPermissions, newViewPermission)
+					person.Fields[i] = f
+					isChanged = true
+				}
+			}
+		}
+	}
+	if isChanged {
+		logger.Critical("CHANGE DONE, SAVING")
+		insertPersonAsBytes, _ := json.Marshal(person)
+		APIstub.PutState(person.Ident, insertPersonAsBytes)
+	}
+	return shim.Success(nil)
+}
+
+func (s *SmartContractPrinter) readHistoryForAsset(stub shim.ChaincodeStubInterface, args []string) sc.Response {
+	if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+
+	personIdent := args[0]
+
+	resultsIterator, err := stub.GetHistoryForKey(personIdent)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	defer resultsIterator.Close()
+
+	// buffer is a JSON array containing historic values for the marble
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+
+	bArrayMemberAlreadyWritten := false
+	for resultsIterator.HasNext() {
+		response, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		// Add a comma before array members, suppress it for the first array member
+		if bArrayMemberAlreadyWritten == true {
+			buffer.WriteString(",")
+		}
+		buffer.WriteString("{\"TxId\":")
+		buffer.WriteString("\"")
+		buffer.WriteString(response.TxId)
+		buffer.WriteString("\"")
+
+		buffer.WriteString(", \"Value\":")
+		// if it was a delete operation on given key, then we need to set the
+		//corresponding value null. Else, we will write the response.Value
+		//as-is (as the Value itself a JSON marble)
+		if response.IsDelete {
+			buffer.WriteString("null")
+		} else {
+			buffer.WriteString(string(response.Value))
+		}
+
+		buffer.WriteString(", \"Timestamp\":")
+		buffer.WriteString("\"")
+		buffer.WriteString(time.Unix(response.Timestamp.Seconds, int64(response.Timestamp.Nanos)).String())
+		buffer.WriteString("\"")
+
+		buffer.WriteString(", \"IsDelete\":")
+		buffer.WriteString("\"")
+		buffer.WriteString(strconv.FormatBool(response.IsDelete))
+		buffer.WriteString("\"")
+
+		buffer.WriteString("}")
+		bArrayMemberAlreadyWritten = true
+	}
+	buffer.WriteString("]")
+
+	fmt.Printf("- getHistoryForAsset returning:\n%s\n", buffer.String())
+
+	return shim.Success(buffer.Bytes())
+}
+
+func isAccessRequestExists(viewPermissions [] ViewPermission, requesterId string) bool {
+	for vpi, vp := range viewPermissions  {
+		fmt.Println(vpi, vp)
+		if vp.RequesterId == requesterId {
+			return true
+		}
+	}
+	return false
+}
+
+func getPerson(personIdent string, APIstub shim.ChaincodeStubInterface) Person {
+
+	personBytes, err := APIstub.GetState(personIdent)
+
+	if err != nil {
+		fmt.Printf("Error creating new Smart Contract: %s", err)
+	}
+
+	var person Person
+	json.Unmarshal(personBytes, &person)
+	return person
 }
 
 func contains(items []string, value string) bool {
