@@ -69,6 +69,8 @@ func (s *SmartContractPrinter) Invoke(stub shim.ChaincodeStubInterface) sc.Respo
 		return s.personAddFields(stub, args)
 	case "approveAccess":
 		return s.approveAccess(stub, args)
+	case "revokeAccessApproval":
+		return s.revokeAccessApproval(stub, args)
 	case "requestAccess":
 		return s.requestAccess(stub, args)
 	case "readHistoryForAsset":
@@ -121,15 +123,15 @@ func (s *SmartContractPrinter) readAllPersons(APIstub shim.ChaincodeStubInterfac
 		if bArrayMemberAlreadyWritten == true {
 			buffer.WriteString(",")
 		}
-		buffer.WriteString("{\"Key\":")
+		/*buffer.WriteString("{\"Key\":")
 		buffer.WriteString("\"")
 		buffer.WriteString(queryResponse.Key)
 		buffer.WriteString("\"")
 
-		buffer.WriteString(", \"Record\":")
+		buffer.WriteString(", \"Record\":")*/
 		// Record is a JSON object, so we write as-is
 		buffer.WriteString(string(queryResponse.Value))
-		buffer.WriteString("}")
+		//buffer.WriteString("}")
 		bArrayMemberAlreadyWritten = true
 	}
 	buffer.WriteString("]")
@@ -249,6 +251,78 @@ func (s *SmartContractPrinter) approveAccess(APIstub shim.ChaincodeStubInterface
 						if !isEndorsementAdded {
 							logger.Critical("ENDORSEMENT NOT FOUND, ADDING NEW")
 							vp.Endorsers = append(vp.Endorsers, clientId)
+							f.ViewPermissions[vpi] = vp
+							isChanged = true
+						}
+					}
+				}
+			}
+		}
+		person.Fields[i] = f
+	}
+	if isChanged {
+		logger.Critical("CHANGE DONE, SAVING")
+		insertPersonAsBytes, _ := json.Marshal(person)
+		APIstub.PutState(person.Ident, insertPersonAsBytes)
+	}
+	return shim.Success(nil)
+}
+
+func (s *SmartContractPrinter) revokeAccessApproval(APIstub shim.ChaincodeStubInterface, args []string) sc.Response {
+
+	client, err := cid.New(APIstub)
+	if err != nil {
+		fmt.Printf("Error creating new Smart Contract: %s", err)
+	}
+
+	cert, err := client.GetX509Certificate()
+
+	var clientId string = cert.Subject.CommonName
+	var personIdent string = args[0]
+	var requesterId = args[1]
+	var fieldNames []string
+
+	_ = json.Unmarshal([]byte(args[2]), &fieldNames)
+
+	logger.Infof("Person ident is:  %d", personIdent)
+	logger.Infof("Requesting client id:  %d", requesterId)
+	logger.Infof("Field names:  %d", fieldNames)
+
+	personBytes, err := APIstub.GetState(personIdent)
+
+	if err != nil {
+		fmt.Printf("Error creating new Smart Contract: %s", err)
+	}
+	if personBytes == nil {
+		return shim.Error("Person " + personIdent + " not found!")
+	}
+	var person Person
+	json.Unmarshal(personBytes, &person)
+	var isChanged bool = false
+
+	for i, f := range person.Fields {
+		fmt.Println(i, f.Name)
+		for fni, fn := range  fieldNames {
+			fmt.Println(fni, fn)
+			if fn == f.Name {
+				isEndorser := contains(f.Endorsers, clientId)
+				if !isEndorser {
+					logger.Critical("CLIENT NOT ENDORSER ON FIELD " + fn)
+					continue
+				}
+				logger.Critical("CLIENT IS ENDORSER ON FIELD " + fn)
+				for vpi, vp := range f.ViewPermissions {
+					fmt.Println(vpi, vp)
+					if vp.RequesterId == requesterId {
+						logger.Critical("REQUESTER ON FIELD FOUND " + vp.RequesterId)
+						var isEndorsementAdded bool = contains(vp.Endorsers, clientId)
+						if isEndorsementAdded {
+							logger.Critical("CLIENT FOUND AS ENDORSER " + clientId + ", REMOVING")
+							for index, s := range vp.Endorsers {
+								if s == clientId {
+									vp.Endorsers = removeIndex(vp.Endorsers, index)
+								}
+							}
 							f.ViewPermissions[vpi] = vp
 							isChanged = true
 						}
@@ -388,6 +462,9 @@ func isAccessRequestExists(viewPermissions [] ViewPermission, requesterId string
 		}
 	}
 	return false
+}
+func removeIndex(s []string, index int) []string {
+	return append(s[:index], s[index+1:]...)
 }
 
 func getPerson(personIdent string, APIstub shim.ChaincodeStubInterface) Person {
